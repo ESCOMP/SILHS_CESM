@@ -29,8 +29,12 @@ module silhs_importance_sample_module
 
 !-----------------------------------------------------------------------
   subroutine importance_sampling_driver &
-             ( num_samples, pdf_params, hydromet_pdf_params,        &
-               X_u_chi_one_lev, X_u_dp1_one_lev, X_u_dp2_one_lev,   &
+             ( num_samples,                                               &
+               cloud_frac_1, cloud_frac_2,                                &
+               mixt_frac, hydromet_pdf_params,                            &
+               cluster_allocation_strategy, l_lh_clustered_sampling,      &
+               l_lh_limit_weights, l_lh_var_frac, l_lh_normalize_weights, &
+               X_u_chi_one_lev, X_u_dp1_one_lev, X_u_dp2_one_lev,         &
                lh_sample_point_weights )
 
   ! Description:
@@ -49,20 +53,13 @@ module silhs_importance_sample_module
     use constants_clubb, only: &
       fstderr           ! Constant
 
-    use pdf_parameter_module, only: &
-      pdf_parameter     ! Type
-
     use hydromet_pdf_parameter_module, only: &
       hydromet_pdf_parameter ! Type
 
     use parameters_silhs, only: &
       eight_cluster_allocation_opt, & ! Constant(s)
       four_cluster_allocation_opt, &
-      two_cluster_cp_nocp_opt, &
-      l_lh_clustered_sampling, & ! Variable(s)
-      l_lh_limit_weights, &
-      cluster_allocation_strategy, &
-      l_lh_normalize_weights
+      two_cluster_cp_nocp_opt
 
     use error_code, only: &
         clubb_at_least_debug_level  ! Procedure
@@ -73,11 +70,21 @@ module silhs_importance_sample_module
     integer, intent(in) :: &
       num_samples       ! Number of SILHS sample points
 
-    type(pdf_parameter), intent(in) :: &
-      pdf_params
+    real( kind = core_rknd ), intent(in) :: &
+      cloud_frac_1, cloud_frac_2, &
+      mixt_frac
 
     type(hydromet_pdf_parameter), intent(in) :: &
       hydromet_pdf_params
+
+    integer, intent(in) :: &
+      cluster_allocation_strategy ! Strategy for distributing sample points
+
+    logical, intent(in) :: &
+      l_lh_clustered_sampling, & ! Use prescribed probability sampling with clusters (SILHS)
+      l_lh_limit_weights, &      ! Ensure weights stay under a given value
+      l_lh_var_frac, &           ! Prescribe variance fractions
+      l_lh_normalize_weights     ! Normalize weights to sum to num_samples
 
     ! Input/Output Variables
     real( kind = core_rknd ), dimension(num_samples), intent(inout) :: &
@@ -117,8 +124,9 @@ module silhs_importance_sample_module
 
     importance_categories = define_importance_categories( )
 
-    category_real_probs = compute_category_real_probs &
-                          ( importance_categories, pdf_params, hydromet_pdf_params )
+    category_real_probs = compute_category_real_probs( importance_categories, &
+                                                       cloud_frac_1, cloud_frac_2, &
+                                                       mixt_frac, hydromet_pdf_params )
 
     if ( l_lh_clustered_sampling ) then
 
@@ -127,13 +135,16 @@ module silhs_importance_sample_module
       select case ( cluster_allocation_strategy )
       case ( eight_cluster_allocation_opt )
         category_prescribed_probs = eight_cluster_allocation &
-                                    ( importance_categories, category_real_probs )
+                                    ( importance_categories, category_real_probs, &
+                                      l_lh_var_frac )
       case ( four_cluster_allocation_opt )
         category_prescribed_probs = four_cluster_no_precip &
-                                    ( importance_categories, category_real_probs )
+                                    ( importance_categories, category_real_probs, &
+                                      l_lh_var_frac )
       case ( two_cluster_cp_nocp_opt )
         category_prescribed_probs = two_cluster_cp_nocp &
-                                    ( importance_categories, category_real_probs )
+                                    ( importance_categories, category_real_probs, &
+                                      l_lh_var_frac )
       case default
         write(fstderr,*) "Unsupported allocation strategy:", cluster_allocation_strategy
         stop "Fatal error in importance_sampling_driver"
@@ -149,7 +160,8 @@ module silhs_importance_sample_module
       ! Importance sampling strategy that places half of all sample points in cloud!
       category_prescribed_probs = cloud_importance_sampling &
                                   ( importance_categories, category_real_probs, &
-                                    pdf_params )
+                                    cloud_frac_1, cloud_frac_2, &
+                                    mixt_frac )
 
     end if ! l_lh_clustered_sampling
 
@@ -170,7 +182,8 @@ module silhs_importance_sample_module
       ! Scale and translate point to reside in its respective cateogry
       call scale_sample_to_category &
            ( importance_categories(int_sample_category(sample)), & ! In
-             pdf_params, hydromet_pdf_params, & ! In
+             cloud_frac_1, cloud_frac_2, &
+             mixt_frac, hydromet_pdf_params, & ! In
              X_u_chi_one_lev(sample), X_u_dp1_one_lev(sample), X_u_dp2_one_lev(sample) ) ! In/Out
 
       ! Pick a weight for the sample point
@@ -193,7 +206,8 @@ module silhs_importance_sample_module
            ( num_samples, importance_categories, category_real_probs, & ! In
              category_prescribed_probs, category_sample_weights, X_u_chi_one_lev, & ! In
              X_u_dp1_one_lev, X_u_dp2_one_lev, lh_sample_point_weights, int_sample_category, & ! In
-             pdf_params, hydromet_pdf_params, & ! In
+             cloud_frac_1, cloud_frac_2, & ! In
+             mixt_frac, hydromet_pdf_params, l_lh_normalize_weights, & ! In
              l_error ) ! Out
 
       if ( l_error ) then
@@ -266,8 +280,9 @@ module silhs_importance_sample_module
 !-----------------------------------------------------------------------
 
 !-----------------------------------------------------------------------
-  function compute_category_real_probs( importance_categories, pdf_params, &
-                                        hydromet_pdf_params ) &
+  function compute_category_real_probs( importance_categories, &
+                                        cloud_frac_1, cloud_frac_2, &
+                                        mixt_frac, hydromet_pdf_params ) &
 
   result( category_real_probs )
 
@@ -291,9 +306,6 @@ module silhs_importance_sample_module
     use constants_clubb, only: &
       one    ! Constant
 
-    use pdf_parameter_module, only: &
-      pdf_parameter           ! Type
-
     use hydromet_pdf_parameter_module, only: &
       hydromet_pdf_parameter  ! Type
 
@@ -303,8 +315,9 @@ module silhs_importance_sample_module
     type(importance_category_type), dimension(num_importance_categories), intent(in) :: &
       importance_categories  ! A list of importance categories
 
-    type(pdf_parameter), intent(in) :: &
-      pdf_params             ! The PDF parameters!
+    real( kind = core_rknd ), intent(in) :: &
+      cloud_frac_1, cloud_frac_2, &
+      mixt_frac
 
     type(hydromet_pdf_parameter), intent(in) :: &
       hydromet_pdf_params    ! The hydrometeor PDF parameters!
@@ -331,13 +344,13 @@ module silhs_importance_sample_module
 
       ! Determine component of category
       if ( importance_categories(icategory)%l_in_component_1 ) then
-        cloud_frac_i     = pdf_params%cloud_frac_1
+        cloud_frac_i     = cloud_frac_1
         precip_frac_i    = hydromet_pdf_params%precip_frac_1
-        component_factor = pdf_params%mixt_frac
+        component_factor = mixt_frac
       else
-        cloud_frac_i     = pdf_params%cloud_frac_2
+        cloud_frac_i     = cloud_frac_2
         precip_frac_i    = hydromet_pdf_params%precip_frac_2
-        component_factor = (one-pdf_params%mixt_frac)
+        component_factor = (one-mixt_frac)
       end if
 
       ! Determine cloud factor
@@ -666,7 +679,8 @@ module silhs_importance_sample_module
 !-----------------------------------------------------------------------
 
 !-----------------------------------------------------------------------
-  subroutine scale_sample_to_category( category, pdf_params, hydromet_pdf_params, &
+  subroutine scale_sample_to_category( category, cloud_frac_1, cloud_frac_2, &
+                                       mixt_frac, hydromet_pdf_params, &
                                        X_u_chi, X_u_dp1, X_u_dp2 )
 
   ! Description:
@@ -683,9 +697,6 @@ module silhs_importance_sample_module
     use constants_clubb, only: &
       one                ! Constant
 
-    use pdf_parameter_module, only: &
-      pdf_parameter
-
     use hydromet_pdf_parameter_module, only: &
       hydromet_pdf_parameter
 
@@ -695,8 +706,9 @@ module silhs_importance_sample_module
     type(importance_category_type), intent(in) :: &
       category             ! Scale the sample point to reside in this category
 
-    type(pdf_parameter), intent(in) :: &
-      pdf_params
+    real( kind = core_rknd ), intent(in) :: &
+      cloud_frac_1, cloud_frac_2, &
+      mixt_frac
 
     type(hydromet_pdf_parameter), intent(in) :: &
       hydromet_pdf_params
@@ -712,14 +724,11 @@ module silhs_importance_sample_module
     ! Local Variables
     real( kind = core_rknd ) :: &
       cloud_frac_i, & 
-      precip_frac_i, &
-      mixt_frac
+      precip_frac_i
 
   !-----------------------------------------------------------------------
 
     !----- Begin Code -----
-
-    mixt_frac = pdf_params%mixt_frac
 
     !--------------------------------------------------------
     ! Scale dp1 variate to be in component 1 or 2
@@ -732,7 +741,7 @@ module silhs_importance_sample_module
       X_u_dp1 = X_u_dp1 * mixt_frac
 
       ! Choose appropriate component cloud and precipitation fractions
-      cloud_frac_i  = pdf_params%cloud_frac_1
+      cloud_frac_i  = cloud_frac_1
       precip_frac_i = hydromet_pdf_params%precip_frac_1
 
     else  ! in component 2
@@ -741,7 +750,7 @@ module silhs_importance_sample_module
       X_u_dp1 = X_u_dp1 * (one - mixt_frac) + mixt_frac
 
       ! Choose appropriate component cloud and precipitation fractions
-      cloud_frac_i  = pdf_params%cloud_frac_2
+      cloud_frac_i  = cloud_frac_2
       precip_frac_i = hydromet_pdf_params%precip_frac_2
 
     end if ! category%l_in_component_1
@@ -777,7 +786,8 @@ module silhs_importance_sample_module
 !-----------------------------------------------------------------------
 
 !-----------------------------------------------------------------------
-  function two_cluster_cp_nocp( importance_categories, category_real_probs ) &
+  function two_cluster_cp_nocp( importance_categories, category_real_probs, &
+                                l_lh_var_frac ) &
 
   result( category_prescribed_probs )
 
@@ -816,6 +826,9 @@ module silhs_importance_sample_module
 
     real( kind = core_rknd ), dimension(num_importance_categories), intent(in) :: &
       category_real_probs     ! The real probability for each category
+
+    logical, intent(in) :: &
+      l_lh_var_frac ! Prescribe variance fractions
 
     ! Output Variable
     real( kind = core_rknd ), dimension(num_importance_categories) :: &
@@ -861,14 +874,16 @@ module silhs_importance_sample_module
 
     category_prescribed_probs = compute_clust_category_probs &
       ( category_real_probs, num_clusters, max_num_categories_in_cluster, &
-        num_categories_in_cluster, cluster_categories, cluster_prescribed_probs )
+        num_categories_in_cluster, cluster_categories, cluster_prescribed_probs, &
+        l_lh_var_frac )
 
     return
   end function two_cluster_cp_nocp
 !-----------------------------------------------------------------------
 
 !-----------------------------------------------------------------------
-  function eight_cluster_allocation( importance_categories, category_real_probs ) &
+  function eight_cluster_allocation( importance_categories, category_real_probs, &
+                                     l_lh_var_frac ) &
 
   result( category_prescribed_probs )
 
@@ -903,6 +918,9 @@ module silhs_importance_sample_module
 
     real( kind = core_rknd ), dimension(num_importance_categories), intent(in) :: &
       category_real_probs     ! The real probability for each category
+
+    logical, intent(in) :: &
+      l_lh_var_frac ! Prescribe variance fractions
 
     ! Output Variable
     real( kind = core_rknd ), dimension(num_importance_categories) :: &
@@ -962,14 +980,16 @@ module silhs_importance_sample_module
 
     category_prescribed_probs = compute_clust_category_probs &
       ( category_real_probs, num_clusters, max_num_categories_in_cluster, &
-        num_categories_in_cluster, cluster_categories, cluster_prescribed_probs )
+        num_categories_in_cluster, cluster_categories, cluster_prescribed_probs, &
+        l_lh_var_frac )
 
     return
   end function eight_cluster_allocation
 !-----------------------------------------------------------------------
 
 !-----------------------------------------------------------------------
-  function four_cluster_no_precip( importance_categories, category_real_probs ) &
+  function four_cluster_no_precip( importance_categories, category_real_probs, &
+                                   l_lh_var_frac ) &
 
   result( category_prescribed_probs )
 
@@ -1018,6 +1038,9 @@ module silhs_importance_sample_module
 
     real( kind = core_rknd ), dimension(num_importance_categories), intent(in) :: &
       category_real_probs     ! The real probability for each category
+
+    logical, intent(in) :: &
+      l_lh_var_frac ! Prescribe variance fractions
 
     ! Output Variable
     real( kind = core_rknd ), dimension(num_importance_categories) :: &
@@ -1082,7 +1105,8 @@ module silhs_importance_sample_module
 
     category_prescribed_probs = compute_clust_category_probs &
       ( category_real_probs, num_clusters, max_num_categories_in_cluster, &
-        num_categories_in_cluster, cluster_categories, cluster_prescribed_probs )
+        num_categories_in_cluster, cluster_categories, cluster_prescribed_probs, &
+        l_lh_var_frac )
 
     return
   end function four_cluster_no_precip
@@ -1091,7 +1115,8 @@ module silhs_importance_sample_module
 !-----------------------------------------------------------------------
   function compute_clust_category_probs &
            ( category_real_probs, num_clusters, max_num_categories_in_cluster, &
-             num_categories_in_cluster, cluster_categories, cluster_fractions ) &
+             num_categories_in_cluster, cluster_categories, cluster_fractions, &
+             l_lh_var_frac ) &
 
   result( category_prescribed_probs )
 
@@ -1105,9 +1130,6 @@ module silhs_importance_sample_module
     ! Included Modules
     use clubb_precision, only: &
       core_rknd       ! Constant
-
-    use parameters_silhs, only: &
-      l_lh_var_frac
 
     implicit none
 
@@ -1128,6 +1150,9 @@ module silhs_importance_sample_module
 
     real( kind = core_rknd ), dimension(num_clusters), intent(in) :: &
       cluster_fractions             ! Prescribed fraction of some sort for each cluster
+
+    logical, intent(in) :: &
+      l_lh_var_frac ! Prescribe variance fractions
 
     ! Output Variable
     real( kind = core_rknd ), dimension(num_importance_categories) :: &
@@ -1407,7 +1432,8 @@ module silhs_importance_sample_module
 
 !-----------------------------------------------------------------------
   function cloud_importance_sampling( importance_categories, category_real_probs, &
-                                      pdf_params ) &
+                                      cloud_frac_1, cloud_frac_2, &
+                                      mixt_frac ) &
 
   result( category_prescribed_probs )
 
@@ -1422,9 +1448,6 @@ module silhs_importance_sample_module
     ! Included Modules
     use clubb_precision, only: &
       core_rknd  ! Constant
-
-    use pdf_parameter_module, only: &
-      pdf_parameter  ! Type
 
     use constants_clubb, only: &
       one,  &    ! Constant(s)
@@ -1449,8 +1472,9 @@ module silhs_importance_sample_module
     real( kind = core_rknd ), dimension(num_importance_categories), intent(in) :: &
       category_real_probs     ! The actual PDF probability for each category
 
-    type(pdf_parameter), intent(in) :: &
-      pdf_params
+    real( kind = core_rknd ), intent(in) :: &
+      cloud_frac_1, cloud_frac_2, &
+      mixt_frac
 
     ! Output Variable
     real( kind = core_rknd ), dimension(num_importance_categories) :: &
@@ -1466,8 +1490,8 @@ module silhs_importance_sample_module
 
     !----- Begin Code -----
 
-    cloud_frac = compute_mean_binormal( pdf_params%cloud_frac_1, pdf_params%cloud_frac_2, &
-                                        pdf_params%mixt_frac )
+    cloud_frac = compute_mean_binormal( cloud_frac_1, cloud_frac_2, &
+                                        mixt_frac )
 
     if ( cloud_frac >= cloud_frac_min_samp .and. cloud_frac < cloud_frac_max_samp ) then
 
@@ -1500,7 +1524,8 @@ module silhs_importance_sample_module
              ( num_samples, importance_categories, category_real_probs, &
                category_prescribed_probs, category_sample_weights, X_u_chi_one_lev, &
                X_u_dp1_one_lev, X_u_dp2_one_lev, lh_sample_point_weights, int_sample_category, &
-               pdf_params, hydromet_pdf_params, &
+               cloud_frac_1, cloud_frac_2, &
+               mixt_frac, hydromet_pdf_params, l_lh_normalize_weights, &
                l_error )
 
   ! Description:
@@ -1517,14 +1542,8 @@ module silhs_importance_sample_module
       one, &               ! Constant(s)
       fstderr
 
-    use pdf_parameter_module, only: &
-      pdf_parameter
-
     use hydromet_pdf_parameter_module, only: &
       hydromet_pdf_parameter
-
-    use parameters_silhs, only: &
-      l_lh_normalize_weights
 
     implicit none
 
@@ -1550,11 +1569,15 @@ module silhs_importance_sample_module
       int_sample_category                 ! An integer for each sample corresponding to the
                                           ! category picked for the sample
 
-    type(pdf_parameter), intent(in) :: &
-      pdf_params
+    real( kind = core_rknd ), intent(in) :: &
+      cloud_frac_1, cloud_frac_2, &
+      mixt_frac
 
     type(hydromet_pdf_parameter), intent(in) :: &
       hydromet_pdf_params
+
+    logical, intent(in) :: &
+      l_lh_normalize_weights ! Normalize weights to sum to num_samples
 
     ! Output Variables
     logical, intent(out) :: &
@@ -1629,18 +1652,18 @@ module silhs_importance_sample_module
 
       ! Verification of component
       if ( category%l_in_component_1 ) then
-        if ( X_u_dp1_one_lev(isample) > pdf_params%mixt_frac ) then
+        if ( X_u_dp1_one_lev(isample) > mixt_frac ) then
           write(fstderr,*) "The component of a sample is incorrect."
           l_error = .true.
         end if
-        cloud_frac_i = pdf_params%cloud_frac_1
+        cloud_frac_i = cloud_frac_1
         precip_frac_i = hydromet_pdf_params%precip_frac_1
       else ! .not. category%l_in_component_1
-        if ( X_u_dp1_one_lev(isample) < pdf_params%mixt_frac ) then
+        if ( X_u_dp1_one_lev(isample) < mixt_frac ) then
           write(fstderr,*) "The component of a sample is incorrect."
           l_error = .true.
         end if
-        cloud_frac_i = pdf_params%cloud_frac_2
+        cloud_frac_i = cloud_frac_2
         precip_frac_i = hydromet_pdf_params%precip_frac_2
       end if ! category%l_in_component_1
 
